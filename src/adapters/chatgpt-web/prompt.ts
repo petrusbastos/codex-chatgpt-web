@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { browserRelayPromptContract } from "./browser-relay";
 import { CHATGPT_CONNECTOR_NAME, ZERO_RISK_CHATGPT_CONNECTOR_NAME } from "../../config";
 import { selectedSkillFile, skillFileTokens, type ChatGptSkillFile } from "./skill-attachments";
 import {
@@ -51,6 +52,7 @@ export type ChatGptContextTokenBreakdown = Partial<Record<
 >>;
 
 export interface CompileChatGptWebPromptOptions {
+  browserRelay?: boolean;
   /** The same display name used to select the ChatGPT plugin for this turn. */
   appName?: string;
   captureLunaCheckpoint?: boolean;
@@ -501,6 +503,9 @@ export function compileChatGptWebPrompt(
     ? { localTools: true, effort: "low" as const, displayLabel: "Zero Risk" as const }
     : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   const captureLunaCheckpoint = options?.captureLunaCheckpoint === true;
+  if (options?.browserRelay && captureLunaCheckpoint) {
+    throw new Error("Browser Relay cannot append a Luna rolling checkpoint after its JSON response");
+  }
   const multipartParts = options?.experimentalMultipartParts;
   const multipartEnabled = multipartParts !== undefined;
   if (manualControl) {
@@ -555,6 +560,7 @@ export function compileChatGptWebPrompt(
     "If a ChatGPT-native capability renders a rich card, widget, chart, or other non-text result, also provide the relevant result as ordinary Markdown in the final answer. A private ChatGPT UI widget never replaces the Markdown answer returned to Codex.",
     "Never copy a ChatGPT widget's HTML, CSS, class names, or DOM markup into the answer unless the user explicitly requested that source markup.",
     "Do not mention this transport contract, context packaging, or capability routing in the user-facing answer unless the user explicitly asks how the bridge works.",
+    ...(options?.browserRelay ? browserRelayPromptContract(parsed) : []),
     ...(mode.localTools ? [
       `The selected local Codex plugin for this turn is ${JSON.stringify(appName)}.`,
       "Do not substitute another plugin for this local connection or send this turn's request identifiers to another plugin. If the selected plugin is unavailable, report that limitation.",
@@ -571,6 +577,13 @@ export function compileChatGptWebPrompt(
       "Do not call local or ChatGPT-native tools. Summarize only the supplied task context according to the final compaction instruction.",
       "Return only the checkpoint summary that the next model needs to resume the task.",
       ]
+    : options?.browserRelay
+    ? [
+      "For local work, request native Codex tool calls through the Browser Relay JSON protocol included above.",
+      "Codex alone executes each requested tool under its sandbox and approval flow. Never claim an action succeeded until its result appears in task history.",
+      "Tool results arrive in a subsequent Codex request. Respond with a fresh valid Browser Relay JSON envelope for the next action or final answer.",
+      "Do not request an MCP connection or call a ChatGPT plugin. Emit exactly one JSON object.",
+    ]
     : mode.localTools
     ? [
       "For local work required by the task, use the selected plugin's tools directly according to their declared descriptions and schemas.",
@@ -650,6 +663,12 @@ export function compileChatGptWebPrompt(
       "The task context is complete. Execute the latest active user request now.",
       "</codex_transport_resume>",
     ]
+    : options?.browserRelay
+    ? [
+      "<codex_transport_resume>",
+      "The task context is complete. Return one Browser Relay JSON object containing native Codex tool calls or a final answer.",
+      "</codex_transport_resume>",
+    ]
     : mode.localTools
     ? [
       "<codex_transport_resume>",
@@ -687,9 +706,11 @@ export function compileChatGptWebPrompt(
         ? { contextTokenBreakdown: contextTokenBreakdown(system, messages, multipartEnabled) }
         : {}),
     };
-    const answerContract = captureLunaCheckpoint
-      ? "Return the complete answer that the outer Codex task should receive, then the required private checkpoint tail."
-      : "Return only the answer that the outer Codex task should receive.";
+    const answerContract = options?.browserRelay && !parsed._compactionRequest
+      ? "Return only the Browser Relay JSON envelope. Codex will interpret it as its next native tool calls or final answer."
+      : captureLunaCheckpoint
+        ? "Return the complete answer that the outer Codex task should receive, then the required private checkpoint tail."
+        : "Return only the answer that the outer Codex task should receive.";
     const resume = omittedMessages > 0 ? [
       "<codex_transport_resume>",
       `${omittedMessages} earlier history items were omitted to fit this compaction request; the supplied history is incomplete.`,
